@@ -96,6 +96,7 @@ A frog is small and quick; a toad is sturdy and carries more. The name is the gr
 - `README.md` — this introduction
 - `docs/public-principles.md` — the operating principles in public form
 - `docs/architecture-overview.md` — the shape of the system, without private detail
+- `docs/doctrine.md` — the laws graded evidence has earned, and how a lesson becomes a rule
 - `SECURITY.md` — how to report security concerns
 - `CONTRIBUTING.md` — how changes are proposed and reviewed
 - `docs/LICENSE-RECOMMENDATION.md` — license recommendation (decision reserved for the principal)
