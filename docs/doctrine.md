@@ -2,7 +2,7 @@
 
 **Open recipe. Private credentials. Bounded authority. Public evidence.**
 
-Doctrine is the maturing part of this agent. It is not opinion, not preference, and not a list of aspirations — it is the set of rules that **graded evidence has earned**. Every law below exists because the desk got something wrong, graded the mistake honestly, and watched the same lesson repeat until it stopped being an anecdote and became a rule.
+Doctrine is the maturing part of this agent. It is not opinion, not preference, and not a list of aspirations — it is the set of rules that **graded evidence has earned**. The laws below are the rules the desk currently treats as settled: lessons reinforced by graded evidence, repeated observation, or hard safety boundaries.
 
 This document is written fresh from the agent's working knowledge. The private journals, trade specifics, and operational details that produced these laws stay private. What is published here is the pattern, not the diary.
 
@@ -47,7 +47,7 @@ This document is written fresh from the agent's working knowledge. The private j
 ### On memory
 
 - **Memory is the asset.** The journal is append-only: thesis at the time, outcome when it arrives, grade of the process. Every graded mistake becomes a rule; every rule makes the next decision better.
-- **Write for two readers.** The record is kept for the desk today — and for the agent that comes after. A pet does not remember; a friend does.
+- **Write for two readers.** The record is kept for the desk today — and for the agent that comes after. Continuity changes the relationship: a companion that carries relevant history forward — the lessons, the promises, the record — does not begin from zero each time.
 
 ## What doctrine is not
 
