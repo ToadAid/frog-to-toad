@@ -1,0 +1,5 @@
+{
+  "_comment": "Copy to config/model.json and fill baseUrl + model. NEVER put the API key in this file — set AGENT1_MODEL_KEY in your environment instead.",
+  "baseUrl": "https://YOUR-PROVIDER/v1/chat/completions",
+  "model": "YOUR-MODEL-NAME"
+}
