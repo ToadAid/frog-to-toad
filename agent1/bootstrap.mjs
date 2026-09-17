@@ -5,6 +5,8 @@
 // not to Agent1's own post-genesis life. Boot #2+ with a valid genesis = resume.
 // v3.1: preserve the lock's LAW/CONTEXT classification into the verified result —
 // the runtime must never promote CONTEXT (upbringing recipe) into constitutional law.
+// Resume binding is path + sha + kind: a classification change with unchanged bytes
+// (e.g. CONTEXT → LAW) refuses and requires a principal-approved re-anchor/re-pin.
 
 import { createHash } from "node:crypto";
 import { existsSync, appendFileSync, readFileSync, statSync, mkdirSync } from "node:fs";
@@ -95,8 +97,9 @@ export function boot({ repoRoot = resolve(HERE, ".."), storesDir = join(HERE, "s
     throw new BootRefused("genesis constitution record malformed — refusing fail-closed");
   }
   for (let i = 0; i < verified.length; i++) {
-    if (g[i]?.path !== verified[i].path || g[i]?.sha !== verified[i].sha) {
-      throw new BootRefused(`genesis constitution mismatch at ${verified[i].path} — constitution changed since genesis; re-anchor requires a principal-approved re-pin`);
+    // Resume binds path + sha + kind — classification drift refuses even with identical bytes.
+    if (g[i]?.path !== verified[i].path || g[i]?.sha !== verified[i].sha || g[i]?.kind !== verified[i].kind) {
+      throw new BootRefused(`genesis constitution mismatch at ${verified[i].path} (path+sha+kind) — constitution changed since genesis; re-anchor requires a principal-approved re-pin`);
     }
   }
   if (first.sourceCommit !== lock.sourceCommit) {

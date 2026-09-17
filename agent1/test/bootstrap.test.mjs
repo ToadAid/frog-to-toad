@@ -1,6 +1,5 @@
-// Fresh evidence for the PR #6 v3.1 repair — LAW/CONTEXT preservation + all prior proofs.
-// Fixture matches the REAL lock: 3 LAW docs + recipe as CONTEXT (the v3 fixture masked
-// the promotion bug by marking everything LAW — corrected here).
+// Fresh evidence for the PR #6 v3.1.1 pinpoint fix — resume binds path + sha + kind.
+// Fixture matches the REAL lock: 3 LAW docs + recipe as CONTEXT.
 // Tests use a TEMP config dir; the repo's real agent1/config/ is never touched.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -37,7 +36,7 @@ function gitBlobSha1(buf) {
 }
 
 function freshSandbox() {
-  const root = mkdtempSync(join(tmpdir(), "agent1-v31-"));
+  const root = mkdtempSync(join(tmpdir(), "agent1-v311-"));
   mkdirSync(join(root, "docs"), { recursive: true });
   mkdirSync(join(root, "stores"), { recursive: true });
   mkdirSync(join(HERE, "test-config"), { recursive: true });
@@ -84,7 +83,28 @@ const run = (root, storesDir, steps, marketFetch = async () => ({ btc: { usd: 76
 const journalLines = storesDir =>
   readFileSync(join(storesDir, "journal.jsonl"), "utf8").trim().split("\n").map(l => JSON.parse(l));
 
-// ---- 1. LAW vs CONTEXT preserved (the v3.1 precision repair) ----
+// ---- pinpoint: resume binds path + sha + kind ----
+
+test("resume binds path+sha+kind: same bytes, kind CONTEXT→LAW refuses", () => {
+  const root = freshSandbox();
+  boot({ repoRoot: root, storesDir: join(root, "stores"), configDir: cfgDir(), now: "2026-09-17T00:00:00Z" });
+  appendFileSync(join(root, "stores", "journal.jsonl"), JSON.stringify({ ts: "t1", type: "entry", kind: "observation", decision: "saw btc" }) + "\n");
+  // flip classification only — file bytes and SHAs unchanged
+  const lock = JSON.parse(readFileSync(join(HERE, "test-config", "constitution.lock.json"), "utf8"));
+  lock.documents[3].kind = "LAW";
+  writeFileSync(join(HERE, "test-config", "constitution.lock.json"), JSON.stringify(lock));
+  assert.throws(
+    () => boot({ repoRoot: root, storesDir: join(root, "stores"), configDir: cfgDir(), now: "2026-09-17T00:05:00Z" }),
+    /genesis constitution mismatch.*path\+sha\+kind/
+  );
+  // restore
+  const restore = JSON.parse(readFileSync(join(HERE, "test-config", "constitution.lock.json"), "utf8"));
+  restore.documents[3].kind = "CONTEXT";
+  writeFileSync(join(HERE, "test-config", "constitution.lock.json"), JSON.stringify(restore));
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ---- LAW vs CONTEXT preserved (v3.1) ----
 
 test("LAW/CONTEXT preserved: recipe is NOT presented as LAW; LAW section holds only the three canonical docs", async () => {
   const { root, storesDir } = runtimeSandbox();
@@ -118,14 +138,13 @@ test("unknown kind in the lock refuses boot (binding stays classified)", () => {
   bad.documents[3].kind = "LAW?";
   writeFileSync(join(HERE, "test-config", "constitution.lock.json"), JSON.stringify(bad));
   assert.throws(() => boot({ repoRoot: root, storesDir: join(root, "stores"), configDir: cfgDir() }), /unknown kind/);
-  // restore for later tests
   const good = JSON.parse(readFileSync(join(HERE, "test-config", "constitution.lock.json"), "utf8"));
   good.documents[3].kind = "CONTEXT";
   writeFileSync(join(HERE, "test-config", "constitution.lock.json"), JSON.stringify(good));
   rmSync(root, { recursive: true, force: true });
 });
 
-// ---- 2. canonical constitution text reaches the model context ----
+// ---- canonical constitution text reaches the model context ----
 
 test("verified canonical constitution text is loaded into the model system context", async () => {
   const { root, storesDir } = runtimeSandbox();
@@ -139,7 +158,7 @@ test("verified canonical constitution text is loaded into the model system conte
   rmSync(root, { recursive: true, force: true });
 });
 
-// ---- 3. Day 0 order is enforced in code ----
+// ---- Day 0 order is enforced in code ----
 
 test("happy path: full Day 0 order completes (uncertainty → observe → journal → memory → bear → stop)", async () => {
   const { root, storesDir } = runtimeSandbox();
@@ -202,7 +221,7 @@ test("skipped stage (observe → memory, journaling skipped) is refused", async 
   rmSync(root, { recursive: true, force: true });
 });
 
-// ---- 4. structural memory provenance ----
+// ---- structural memory provenance ----
 
 test("Agent1 memory is stored with UNVERIFIED_WORKING_NOTE provenance", async () => {
   const { root, storesDir } = runtimeSandbox();
@@ -233,7 +252,7 @@ test("Agent1 cannot self-label PRINCIPAL_DECLARED — refused and journaled", as
   rmSync(root, { recursive: true, force: true });
 });
 
-// ---- 5. truthful roster ----
+// ---- truthful roster ----
 
 test("advertised Stage 0 tools exactly match implemented tools", async () => {
   const { root, storesDir } = runtimeSandbox();
