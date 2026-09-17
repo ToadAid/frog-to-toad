@@ -3,6 +3,8 @@
 // Fail-closed order: constitution verify → identity anchor → genesis receipt (first boot only).
 // v2: resume-aware identity anchor — clone detection applies to PRE-GENESIS contamination,
 // not to Agent1's own post-genesis life. Boot #2+ with a valid genesis = resume.
+// v3.1: preserve the lock's LAW/CONTEXT classification into the verified result —
+// the runtime must never promote CONTEXT (upbringing recipe) into constitutional law.
 
 import { createHash } from "node:crypto";
 import { existsSync, appendFileSync, readFileSync, statSync, mkdirSync } from "node:fs";
@@ -35,16 +37,20 @@ function readMemoryState(memoryPath) {
 
 export function boot({ repoRoot = resolve(HERE, ".."), storesDir = join(HERE, "stores"), configDir = join(HERE, "config"), now = new Date().toISOString() } = {}) {
   // 1. Constitution verify — pinned SHAs, computed locally, no network.
+  //    kind is part of the binding: LAW = governing, CONTEXT = non-governing guidance.
   const lock = JSON.parse(readFileSync(join(configDir, "constitution.lock.json"), "utf8"));
   const verified = [];
   for (const doc of lock.documents) {
+    if (doc.kind !== "LAW" && doc.kind !== "CONTEXT") {
+      throw new BootRefused(`constitution doc ${doc.path} has unknown kind "${doc.kind}" — lock must classify LAW or CONTEXT`);
+    }
     const p = join(repoRoot, doc.path);
     if (!existsSync(p)) throw new BootRefused(`constitution doc missing: ${doc.path}`);
     const sha = gitBlobSha1(readFileSync(p));
     if (sha !== doc.gitBlobSha1) {
       throw new BootRefused(`constitution mismatch: ${doc.path} pinned ${doc.gitBlobSha1} found ${sha}`);
     }
-    verified.push({ path: doc.path, sha });
+    verified.push({ path: doc.path, sha, kind: doc.kind });
   }
 
   // 2. Identity anchor — the journal's first record is Agent1's birth certificate.
@@ -67,7 +73,7 @@ export function boot({ repoRoot = resolve(HERE, ".."), storesDir = join(HERE, "s
       ts: now,
       type: "genesis",
       note: "boot complete; constitution verified; stores were empty at boot; first reflective entry belongs to Agent1",
-      constitution: verified.map(v => ({ path: v.path, sha: v.sha })),
+      constitution: verified.map(v => ({ path: v.path, sha: v.sha, kind: v.kind })),
       sourceCommit: lock.sourceCommit,
     };
     appendFileSync(journalPath, JSON.stringify(genesis) + "\n");
@@ -105,7 +111,7 @@ if (isMain) {
   try {
     const r = boot();
     console.log(`Agent1 booted (${r.mode}). Constitution verified: ${r.verified.length} docs @ ${r.genesis.sourceCommit.slice(0, 12)}`);
-    for (const v of r.verified) console.log(`  ok ${v.path} @ ${v.sha.slice(0, 12)}`);
+    for (const v of r.verified) console.log(`  ok ${v.kind.padEnd(7)} ${v.path} @ ${v.sha.slice(0, 12)}`);
     if (r.mode === "first-boot") console.log("Genesis receipt written.");
     console.log("Stage 0 — Eyes. Stop at the human authority boundary.");
   } catch (e) {

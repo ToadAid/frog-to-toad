@@ -1,7 +1,10 @@
-// Agent1 Stage 0 runtime v3 — the smallest thing that actually runs the baby.
+// Agent1 Stage 0 runtime v3.1 — the smallest thing that actually runs the baby.
 // Plain node, zero dependencies. Model adapter is injectable (tests run offline).
 // v3: verified constitution text in model context · code-enforced Day 0 state machine ·
 //     structural memory provenance · truthful tool roster (advertised === implemented).
+// v3.1: LAW vs CONTEXT preserved from the lock — LAW loads under the canonical-law
+//     section; CONTEXT (upbringing recipe) is labeled explicitly non-governing.
+//     Canonical LAW governs on conflict. The binding is repaired, not the doctrine.
 
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -104,15 +107,22 @@ function buildSystemPrompt(repoRoot, verifiedDocs) {
   } catch {
     identity = "(agent.md missing — constitution still governs via the lock)";
   }
-  // The VERIFIED canonical law itself — loaded from the SHA-verified files, by reference.
-  // The lock remains the source-binding mechanism; this is a read, not a law copy.
-  const constitution = verifiedDocs
+  // LAW vs CONTEXT — preserved from the lock through boot verification.
+  const law = verifiedDocs.filter(v => v.kind === "LAW");
+  const context = verifiedDocs.filter(v => v.kind === "CONTEXT");
+  const lawText = law
+    .map(v => `### ${v.path} — verified @ ${v.sha.slice(0, 12)}\n\n${readFileSync(join(repoRoot, v.path), "utf8")}`)
+    .join("\n\n---\n\n");
+  const contextText = context
     .map(v => `### ${v.path} — verified @ ${v.sha.slice(0, 12)}\n\n${readFileSync(join(repoRoot, v.path), "utf8")}`)
     .join("\n\n---\n\n");
   return (
     identity +
-    "\n\n## Constitution — verified canonical law (SHA-pinned at boot)\n\n" +
-    constitution +
+    "\n\n## Constitution — verified canonical LAW (SHA-pinned at boot; GOVERNING)\n\n" +
+    lawText +
+    (contextText
+      ? "\n\n## Upbringing context — verified but NON-GOVERNING (guidance only; canonical LAW above governs on any conflict)\n\n" + contextText
+      : "") +
     "\n\n## Runtime contract\n" +
     "You are in Stage 0 — Eyes. Your only writes are to your OWN journal and memory. " +
     "Every action must be exactly one JSON object: a tool call or a say. " +

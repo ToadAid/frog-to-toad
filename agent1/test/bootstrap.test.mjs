@@ -1,6 +1,7 @@
-// Fresh evidence for the PR #6 v3 repair — constitution-in-context, Day 0 state machine,
-// structural provenance, truthful roster. Tests use a TEMP config dir; the repo's real
-// agent1/config/ is never touched by a test run.
+// Fresh evidence for the PR #6 v3.1 repair — LAW/CONTEXT preservation + all prior proofs.
+// Fixture matches the REAL lock: 3 LAW docs + recipe as CONTEXT (the v3 fixture masked
+// the promotion bug by marking everything LAW — corrected here).
+// Tests use a TEMP config dir; the repo's real agent1/config/ is never touched.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, appendFileSync, rmSync } from "node:fs";
@@ -12,7 +13,12 @@ import { boot, BootRefused } from "../bootstrap.mjs";
 import { runDay0, parseModelAction, STAGE0_IMPLEMENTED, DAY0_STAGES } from "../runtime.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const DOCS = ["public-principles.md", "doctrine.md", "witness-contract-v2.md", "agent1-upbringing-recipe.md"];
+const DOCS = [
+  { f: "public-principles.md", kind: "LAW" },
+  { f: "doctrine.md", kind: "LAW" },
+  { f: "witness-contract-v2.md", kind: "LAW" },
+  { f: "agent1-upbringing-recipe.md", kind: "CONTEXT" },
+];
 
 const POLICY = {
   stage: 0,
@@ -31,15 +37,15 @@ function gitBlobSha1(buf) {
 }
 
 function freshSandbox() {
-  const root = mkdtempSync(join(tmpdir(), "agent1-v3-"));
+  const root = mkdtempSync(join(tmpdir(), "agent1-v31-"));
   mkdirSync(join(root, "docs"), { recursive: true });
   mkdirSync(join(root, "stores"), { recursive: true });
   mkdirSync(join(HERE, "test-config"), { recursive: true });
   const documents = [];
-  for (const f of DOCS) {
-    const body = `# ${f}\n\ncanonical content for v3 boot test ${f}\n`;
-    writeFileSync(join(root, "docs", f), body);
-    documents.push({ path: `docs/${f}`, kind: "LAW", gitBlobSha1: gitBlobSha1(Buffer.from(body)) });
+  for (const d of DOCS) {
+    const body = `# ${d.f}\n\ncanonical content for v3.1 boot test ${d.f}\n`;
+    writeFileSync(join(root, "docs", d.f), body);
+    documents.push({ path: `docs/${d.f}`, kind: d.kind, gitBlobSha1: gitBlobSha1(Buffer.from(body)) });
   }
   writeFileSync(join(HERE, "test-config", "constitution.lock.json"), JSON.stringify({
     lockVersion: 1, pinnedAt: "2026-09-17", sourceRepo: "sandbox", sourceCommit: "a".repeat(40),
@@ -78,21 +84,62 @@ const run = (root, storesDir, steps, marketFetch = async () => ({ btc: { usd: 76
 const journalLines = storesDir =>
   readFileSync(join(storesDir, "journal.jsonl"), "utf8").trim().split("\n").map(l => JSON.parse(l));
 
-// ---- 1. canonical constitution text reaches the model context ----
+// ---- 1. LAW vs CONTEXT preserved (the v3.1 precision repair) ----
+
+test("LAW/CONTEXT preserved: recipe is NOT presented as LAW; LAW section holds only the three canonical docs", async () => {
+  const { root, storesDir } = runtimeSandbox();
+  const r = await run(root, storesDir, HAPPY);
+  const sp = r.systemPrompt;
+  const lawIdx = sp.indexOf("## Constitution — verified canonical LAW");
+  const ctxIdx = sp.indexOf("## Upbringing context");
+  assert.ok(lawIdx >= 0, "LAW section heading must exist");
+  assert.ok(ctxIdx > lawIdx, "CONTEXT section must come after LAW and be labeled NON-GOVERNING");
+  assert.ok(sp.includes("NON-GOVERNING"), "context must be explicitly labeled non-governing");
+  for (const d of DOCS.filter(x => x.kind === "LAW")) {
+    const bodyIdx = sp.indexOf(`canonical content for v3.1 boot test ${d.f}`);
+    assert.ok(bodyIdx > lawIdx && bodyIdx < ctxIdx, `${d.f} (LAW) must appear inside the LAW section`);
+  }
+  const recipeIdx = sp.indexOf("canonical content for v3.1 boot test agent1-upbringing-recipe.md");
+  assert.ok(recipeIdx > ctxIdx, "recipe (CONTEXT) must appear ONLY inside the non-governing section, never as LAW");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("genesis receipt preserves the lock's LAW/CONTEXT kinds", () => {
+  const root = freshSandbox();
+  const r = boot({ repoRoot: root, storesDir: join(root, "stores"), configDir: cfgDir(), now: "2026-09-17T00:00:00Z" });
+  const kinds = r.genesis.constitution.map(c => c.kind);
+  assert.deepEqual(kinds, ["LAW", "LAW", "LAW", "CONTEXT"]);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("unknown kind in the lock refuses boot (binding stays classified)", () => {
+  const root = freshSandbox();
+  const bad = JSON.parse(readFileSync(join(HERE, "test-config", "constitution.lock.json"), "utf8"));
+  bad.documents[3].kind = "LAW?";
+  writeFileSync(join(HERE, "test-config", "constitution.lock.json"), JSON.stringify(bad));
+  assert.throws(() => boot({ repoRoot: root, storesDir: join(root, "stores"), configDir: cfgDir() }), /unknown kind/);
+  // restore for later tests
+  const good = JSON.parse(readFileSync(join(HERE, "test-config", "constitution.lock.json"), "utf8"));
+  good.documents[3].kind = "CONTEXT";
+  writeFileSync(join(HERE, "test-config", "constitution.lock.json"), JSON.stringify(good));
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ---- 2. canonical constitution text reaches the model context ----
 
 test("verified canonical constitution text is loaded into the model system context", async () => {
   const { root, storesDir } = runtimeSandbox();
   const r = await run(root, storesDir, HAPPY);
   const sp = r.systemPrompt;
-  for (const f of DOCS) {
-    assert.ok(sp.includes(`canonical content for v3 boot test ${f}`), `constitution text for ${f} must reach model context`);
-    assert.ok(sp.includes(`docs/${f}`), `doc path ${f} must be cited in context`);
+  for (const d of DOCS) {
+    assert.ok(sp.includes(`canonical content for v3.1 boot test ${d.f}`), `constitution text for ${d.f} must reach model context`);
+    assert.ok(sp.includes(`docs/${d.f}`), `doc path ${d.f} must be cited in context`);
   }
   assert.ok(sp.includes("verified @ "), "verification provenance must be shown in context");
   rmSync(root, { recursive: true, force: true });
 });
 
-// ---- 2. Day 0 order is enforced in code ----
+// ---- 3. Day 0 order is enforced in code ----
 
 test("happy path: full Day 0 order completes (uncertainty → observe → journal → memory → bear → stop)", async () => {
   const { root, storesDir } = runtimeSandbox();
@@ -155,7 +202,7 @@ test("skipped stage (observe → memory, journaling skipped) is refused", async 
   rmSync(root, { recursive: true, force: true });
 });
 
-// ---- 3. structural memory provenance ----
+// ---- 4. structural memory provenance ----
 
 test("Agent1 memory is stored with UNVERIFIED_WORKING_NOTE provenance", async () => {
   const { root, storesDir } = runtimeSandbox();
@@ -186,7 +233,7 @@ test("Agent1 cannot self-label PRINCIPAL_DECLARED — refused and journaled", as
   rmSync(root, { recursive: true, force: true });
 });
 
-// ---- 4. truthful roster ----
+// ---- 5. truthful roster ----
 
 test("advertised Stage 0 tools exactly match implemented tools", async () => {
   const { root, storesDir } = runtimeSandbox();
@@ -252,7 +299,7 @@ test("foreign genesis (different constitution SHAs) refuses", () => {
   const root = freshSandbox();
   const foreign = {
     type: "genesis", ts: "t0",
-    constitution: DOCS.map(f => ({ path: `docs/${f}`, sha: "f".repeat(40) })),
+    constitution: DOCS.map(d => ({ path: `docs/${d.f}`, sha: "f".repeat(40), kind: d.kind })),
     sourceCommit: "b".repeat(40),
   };
   writeFileSync(join(root, "stores", "journal.jsonl"), JSON.stringify(foreign) + "\n");
