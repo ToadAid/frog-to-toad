@@ -1,0 +1,29 @@
+{
+  "lockVersion": 1,
+  "pinnedAt": "2026-09-17",
+  "sourceRepo": "ToadAid/frog-to-toad",
+  "sourceCommit": "7429d2709caa1de839168749e954d4a30662acaf",
+  "rule": "boot fails closed on any mismatch; re-pin requires a principal-approved PR",
+  "documents": [
+    {
+      "path": "docs/public-principles.md",
+      "kind": "LAW",
+      "gitBlobSha1": "c5c2fdb2571400f7f5b6aca49172fa4dfd1c9e7b"
+    },
+    {
+      "path": "docs/doctrine.md",
+      "kind": "LAW",
+      "gitBlobSha1": "9355673dc7a71ee7a6f12fac97a3bae4cbb47af8"
+    },
+    {
+      "path": "docs/witness-contract-v2.md",
+      "kind": "LAW",
+      "gitBlobSha1": "7ce39ebfbdc09fd2f51bdfd2cbae8cca58ccd662"
+    },
+    {
+      "path": "docs/agent1-upbringing-recipe.md",
+      "kind": "CONTEXT",
+      "gitBlobSha1": "900de50c1f5ea59b080e59929f13609084651085"
+    }
+  ]
+}

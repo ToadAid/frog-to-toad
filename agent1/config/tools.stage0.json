@@ -1,0 +1,35 @@
+{
+  "stage": 0,
+  "name": "Eyes",
+  "allowed": {
+    "read": [
+      "market_price",
+      "market_token_search",
+      "market_technicals",
+      "market_news",
+      "market_sentiment",
+      "market_trending",
+      "market_onchain"
+    ],
+    "write": [
+      "journal_append",
+      "memory_save"
+    ]
+  },
+  "denied": [
+    "swap_execute",
+    "paper_bracket_handoff",
+    "paper_perp_open",
+    "sniper_scan",
+    "sniper_shadow_probe",
+    "send_alert",
+    "schedule_create",
+    "spawn_subagent",
+    "spawn_scouts",
+    "convene_witness",
+    "mailbox_send",
+    "github write tools",
+    "wallet tools"
+  ],
+  "notes": "Write scope: own stores only (agent1/stores/). memory_save target=self only. Any tool not listed under allowed is denied — fail closed."
+}
