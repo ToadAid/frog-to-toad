@@ -1,6 +1,7 @@
-// Agent1 Stage 0 runtime — the smallest thing that actually runs the baby.
+// Agent1 Stage 0 runtime v3 — the smallest thing that actually runs the baby.
 // Plain node, zero dependencies. Model adapter is injectable (tests run offline).
-// Enforces tools.stage0.json fail-closed; writes ONLY Agent1's own stores.
+// v3: verified constitution text in model context · code-enforced Day 0 state machine ·
+//     structural memory provenance · truthful tool roster (advertised === implemented).
 
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -46,6 +47,26 @@ export function parseModelAction(text) {
   return { say: String(text).trim() };
 }
 
+// ---- Day 0 state machine (code-enforced; prompt guidance is NOT the authority) ----
+
+export const DAY0_STAGES = ["UNCERTAINTY", "OBSERVE", "JOURNAL_OBSERVATION", "MEMORY", "BEAR_PASS", "COMPLETE"];
+
+export function expectedAction(stage) {
+  switch (stage) {
+    case "UNCERTAINTY": return 'journal_append kind=uncertainty_recitation (your own words: what the constitution governs, what you don\'t know)';
+    case "OBSERVE": return "market_price (the only wired read tool in Stage 0)";
+    case "JOURNAL_OBSERVATION": return 'journal_append kind=observation (what you saw + what you don\'t know)';
+    case "MEMORY": return "memory_save key=day0 (your first memory — the runtime stamps it UNVERIFIED_WORKING_NOTE)";
+    case "BEAR_PASS": return 'journal_append kind=bear_pass (challenge your own observation)';
+    case "COMPLETE": return '{"say":"day0 complete"}';
+    default: return "unknown stage";
+  }
+}
+
+// ---- truthful Stage 0 roster: exactly what is implemented ----
+
+export const STAGE0_IMPLEMENTED = ["market_price", "journal_append", "memory_save"];
+
 // ---- Stage 0 tool registry (own stores only; observation via injectable fetch) ----
 
 function defaultMarketFetch(url) {
@@ -66,27 +87,37 @@ function marketPrice(args, marketFetch) {
 }
 
 const DAY0_TASK =
-  "Day 0 protocol, one tool call per turn, in order: " +
-  "(1) market_price for one major (btc, eth, or sol). " +
-  "(2) journal_append kind=observation: what you saw, and explicitly what you don't know. " +
-  "(3) memory_save key=day0: your first memory — one durable fact from your own observation. " +
-  "(4) journal_append kind=bear_pass: challenge your own observation with the strongest bear point. " +
-  "(5) {\"say\":\"day0 complete\"}. " +
+  "Day 0 protocol is ENFORCED IN CODE — one action per turn, in this exact order:\n" +
+  "(1) journal_append kind=uncertainty_recitation — recite the uncertainty order in your own words.\n" +
+  "(2) market_price for one major (btc, eth, or sol) — the only wired read tool.\n" +
+  "(3) journal_append kind=observation — what you saw, and explicitly what you don't know.\n" +
+  "(4) memory_save key=day0 — your first memory (the runtime stamps it UNVERIFIED_WORKING_NOTE).\n" +
+  "(5) journal_append kind=bear_pass — challenge your own observation with the strongest bear point.\n" +
+  '(6) {"say":"day0 complete"} — then STOP at the human authority boundary.\n' +
+  "Out-of-order actions are refused by the runtime. " +
   'Respond ONLY with JSON: {"tool":"<name>","args":{...}} or {"say":"..."}';
 
-function buildSystemPrompt() {
+function buildSystemPrompt(repoRoot, verifiedDocs) {
   let identity = "";
   try {
     identity = readFileSync(join(HERE, "agent.md"), "utf8");
   } catch {
     identity = "(agent.md missing — constitution still governs via the lock)";
   }
+  // The VERIFIED canonical law itself — loaded from the SHA-verified files, by reference.
+  // The lock remains the source-binding mechanism; this is a read, not a law copy.
+  const constitution = verifiedDocs
+    .map(v => `### ${v.path} — verified @ ${v.sha.slice(0, 12)}\n\n${readFileSync(join(repoRoot, v.path), "utf8")}`)
+    .join("\n\n---\n\n");
   return (
     identity +
+    "\n\n## Constitution — verified canonical law (SHA-pinned at boot)\n\n" +
+    constitution +
     "\n\n## Runtime contract\n" +
     "You are in Stage 0 — Eyes. Your only writes are to your OWN journal and memory. " +
     "Every action must be exactly one JSON object: a tool call or a say. " +
-    "Finish with the bear pass, then say day0 complete, then STOP at the human authority boundary."
+    "The Day 0 order is enforced in code — out-of-order actions are refused. " +
+    "Finish the bear pass, say day0 complete, then STOP at the human authority boundary."
   );
 }
 
@@ -96,7 +127,7 @@ export async function runDay0({
   repoRoot = resolve(HERE, ".."),
   storesDir = join(HERE, "stores"),
   configDir = join(HERE, "config"),
-  maxTurns = 10,
+  maxTurns = 16,
   now = () => new Date().toISOString(),
   log = () => {},
 } = {}) {
@@ -105,9 +136,14 @@ export async function runDay0({
   // Boot is resume-aware (bootstrap.mjs v2): first boot writes genesis, later boots resume.
   const b = boot({ repoRoot, storesDir, configDir, now: now() });
 
-  // Stage 0 policy — fail closed: anything not explicitly allowed is refused.
+  // Truthful roster: advertised = runnable = implemented. Reserved tools are never advertised.
   const policy = JSON.parse(readFileSync(join(configDir, "tools.stage0.json"), "utf8"));
-  const allowed = new Set([...policy.allowed.read, ...policy.allowed.write]);
+  const runnable = [...(policy.runnable?.read ?? []), ...(policy.runnable?.write ?? [])];
+  const allowed = new Set(runnable);
+  const implemented = new Set(STAGE0_IMPLEMENTED);
+  if (runnable.length !== implemented.size || [...allowed].some(t => !implemented.has(t))) {
+    throw new Error(`roster drift: policy advertises ${runnable.sort().join(",")} but runtime implements ${[...implemented].sort().join(",")} — refusing fail-closed`);
+  }
 
   const journalPath = join(storesDir, "journal.jsonl");
   const memoryPath = join(storesDir, "memory.json");
@@ -116,79 +152,129 @@ export async function runDay0({
   const tools = {
     market_price: args => marketPrice(args, marketFetch),
     journal_append: args => {
+      const kind = args?.kind;
+      if (!["uncertainty_recitation", "observation", "bear_pass"].includes(kind)) {
+        return { refused: true, reason: `kind "${kind}" is not part of the Day 0 protocol` };
+      }
       const entry = {
         ts: now(),
         type: "entry",
-        kind: args?.kind === "bear_pass" ? "bear_pass" : "observation",
+        kind,
         symbol: args?.symbol ?? null,
         decision: String(args?.decision ?? ""),
         outcome: args?.outcome ?? null,
       };
       jline(entry);
-      return { ok: true, wrote: entry.kind };
+      return { ok: true, wrote: kind };
     },
     memory_save: args => {
-      // Own-store write, target=self only, by construction.
+      // Structural provenance: the model can never self-label. Only an authenticated
+      // principal path may ever create PRINCIPAL_DECLARED — that path does not exist here.
+      if (args?.provenance && args.provenance !== "UNVERIFIED_WORKING_NOTE") {
+        return {
+          refused: true,
+          reason: "provenance is structural — Agent1 writes are UNVERIFIED_WORKING_NOTE; only an authenticated principal path may create PRINCIPAL_DECLARED",
+        };
+      }
       const mem = JSON.parse(readFileSync(memoryPath, "utf8") || "{}");
-      mem[String(args?.key ?? "note")] = String(args?.content ?? "");
+      mem[String(args?.key ?? "note")] = {
+        content: String(args?.content ?? ""),
+        provenance: "UNVERIFIED_WORKING_NOTE",
+        ts: now(),
+      };
       writeFileSync(memoryPath, JSON.stringify(mem, null, 2) + "\n");
-      return { ok: true, key: String(args?.key ?? "note") };
+      return { ok: true, key: String(args?.key ?? "note"), provenance: "UNVERIFIED_WORKING_NOTE" };
     },
   };
 
   const messages = [
-    { role: "system", content: buildSystemPrompt() },
+    { role: "system", content: buildSystemPrompt(repoRoot, b.verified) },
     { role: "user", content: DAY0_TASK },
   ];
 
   const transcript = [];
   const refusals = [];
-  let bearPassDone = false;
+  let stage = "UNCERTAINTY";
+  let completed = false;
 
-  for (let turn = 1; turn <= maxTurns && !bearPassDone; turn++) {
+  const refuse = rec => {
+    jline(rec);
+    refusals.push(rec);
+    log(`[refused] ${rec.type}: ${rec.tool ?? ""} ${rec.reason}`);
+  };
+
+  for (let turn = 1; turn <= maxTurns && !completed; turn++) {
     const text = await model.complete(messages);
-    transcript.push({ turn, text });
-    log(`[turn ${turn}] ${text}`);
+    transcript.push({ turn, stage, text });
+    log(`[turn ${turn} @ ${stage}] ${text}`);
     const act = parseModelAction(text);
 
     if (act.say !== undefined) {
-      messages.push({ role: "assistant", content: text });
-      messages.push({
-        role: "user",
-        content: bearPassDone
-          ? "Day 0 complete. Stop at the human authority boundary."
-          : "Continue Day 0: observation → journal #1 → first memory → bear pass. Use your tools.",
-      });
+      if (/day0 complete/i.test(act.say)) {
+        if (stage === "COMPLETE") {
+          completed = true;
+          messages.push({ role: "assistant", content: text });
+          messages.push({ role: "user", content: "Day 0 complete. Stop at the human authority boundary." });
+        } else {
+          refuse({ ts: now(), type: "stage_refused", stage, attempted: "day0 complete", reason: `premature completion — Day 0 order requires: ${expectedAction(stage)}` });
+          messages.push({ role: "assistant", content: text });
+          messages.push({ role: "user", content: `REFUSED: premature completion. Next required action: ${expectedAction(stage)}` });
+        }
+      } else {
+        messages.push({ role: "assistant", content: text });
+        messages.push({ role: "user", content: `Continue Day 0. Next required action: ${expectedAction(stage)}` });
+      }
       continue;
     }
 
     const name = String(act.tool ?? "");
     if (!allowed.has(name) || !Object.prototype.hasOwnProperty.call(tools, name)) {
-      const rec = {
-        ts: now(),
-        type: "tool_refused",
-        tool: name,
-        reason: allowed.has(name) ? "not implemented in Stage 0 runtime" : "not in Stage 0 roster — fail closed",
-      };
-      jline(rec);
-      refusals.push(rec);
-      log(`[refused] ${name}: ${rec.reason}`);
+      refuse({
+        ts: now(), type: "tool_refused", tool: name,
+        reason: allowed.has(name) ? "not implemented in Stage 0 runtime" : "not in the runnable Stage 0 roster — RESERVED / NOT YET WIRED, fail closed",
+      });
       messages.push({ role: "assistant", content: text });
-      messages.push({ role: "user", content: `REFUSED: ${rec.reason}. Stage 0 roster: ${[...allowed].join(", ")}.` });
+      messages.push({ role: "user", content: `REFUSED: ${name} is not runnable in Stage 0. Runnable roster: ${[...allowed].sort().join(", ")}. Next required action: ${expectedAction(stage)}` });
+      continue;
+    }
+
+    // Stage gate — the code, not the prompt, is the authority.
+    const stageOk =
+      (stage === "UNCERTAINTY" && name === "journal_append" && act.args?.kind === "uncertainty_recitation") ||
+      (stage === "OBSERVE" && name === "market_price") ||
+      (stage === "JOURNAL_OBSERVATION" && name === "journal_append" && act.args?.kind === "observation") ||
+      (stage === "MEMORY" && name === "memory_save") ||
+      (stage === "BEAR_PASS" && name === "journal_append" && act.args?.kind === "bear_pass");
+
+    if (!stageOk) {
+      refuse({ ts: now(), type: "stage_refused", stage, attempted: name + (act.args?.kind ? ` kind=${act.args.kind}` : ""), reason: `Day 0 order — next required action: ${expectedAction(stage)}` });
+      messages.push({ role: "assistant", content: text });
+      messages.push({ role: "user", content: `REFUSED: out of Day 0 order. Next required action: ${expectedAction(stage)}` });
       continue;
     }
 
     const result = await tools[name](act.args ?? {});
-    if (name === "journal_append" && result.wrote === "bear_pass") bearPassDone = true;
+    if (result?.refused) {
+      refuse({ ts: now(), type: `${name}_refused`, tool: name, reason: result.reason });
+      messages.push({ role: "assistant", content: text });
+      messages.push({ role: "user", content: `REFUSED: ${result.reason}` });
+      continue;
+    }
+
     log(`[ok] ${name} → ${JSON.stringify(result)}`);
+    if (stage === "UNCERTAINTY") stage = "OBSERVE";
+    else if (stage === "OBSERVE") stage = "JOURNAL_OBSERVATION";
+    else if (stage === "JOURNAL_OBSERVATION") stage = "MEMORY";
+    else if (stage === "MEMORY") stage = "BEAR_PASS";
+    else if (stage === "BEAR_PASS") stage = "COMPLETE";
     messages.push({ role: "assistant", content: text });
     messages.push({ role: "user", content: `TOOL OK ${name}: ${JSON.stringify(result)}` });
   }
 
-  return { boot: b, transcript, refusals, bearPassDone, journalPath, memoryPath };
+  return { boot: b, transcript, refusals, completed, finalStage: stage, journalPath, memoryPath, systemPrompt: messages[0].content };
 }
 
-// ---- CLI: node agent1/runtime.mjs ----
+// ---- CLI: node agent1/runtime.mjs (launch host: Dell/TNG, after merge) ----
 
 function loadModelConfig() {
   const env = process.env;
@@ -214,7 +300,7 @@ if (isMain) {
       }
       const model = makeFetchModel(cfg);
       const r = await runDay0({ model, log: console.log });
-      console.log(`\nDay 0 ${r.bearPassDone ? "complete" : "INCOMPLETE (turn cap)"} — boot mode: ${r.boot.mode}, refusals: ${r.refusals.length}`);
+      console.log(`\nDay 0 ${r.completed ? "complete" : "INCOMPLETE (turn cap)"} — boot mode: ${r.boot.mode}, final stage: ${r.finalStage}, refusals: ${r.refusals.length}`);
       console.log("Stopped at the human authority boundary.");
     } catch (e) {
       console.error(`RUNTIME REFUSED: ${e.message}`);
