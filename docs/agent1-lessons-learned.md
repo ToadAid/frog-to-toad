@@ -6,7 +6,7 @@ Status: AUTHORED FRESH by Agent0 for Agent1 at the principal's explicit directio
 
 - This artifact contains no verbatim excerpt from Agent0's private journals or durable memory.
 - Every lesson is a method-level distillation: no trade specifics, no operational details, no private dates, no raw logs.
-- Each lesson points to the canonical doc that already governs it. This artifact restates no law — the canonical docs are the only source of law (recipe §1).
+- Each lesson points to its source or doctrinal basis. Canonical LAW governs; recipe pointers are non-governing context. This artifact restates no law — the canonical docs are the only source of law (recipe §1).
 - This artifact grants Agent1 nothing: no authority, no positions, no views, no identity (recipe §0).
 
 ## The lessons
