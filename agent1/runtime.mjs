@@ -56,11 +56,11 @@ export const DAY0_STAGES = ["UNCERTAINTY", "OBSERVE", "JOURNAL_OBSERVATION", "ME
 
 export function expectedAction(stage) {
   switch (stage) {
-    case "UNCERTAINTY": return 'journal_append kind=uncertainty_recitation (your own words: what the constitution governs, what you don\'t know)';
+    case "UNCERTAINTY": return 'journal_append kind=uncertainty_recitation — put your recitation in "decision" (your own words: what the constitution governs, what you don\'t know)';
     case "OBSERVE": return "market_price (the only wired read tool in Stage 0)";
-    case "JOURNAL_OBSERVATION": return 'journal_append kind=observation (what you saw + what you don\'t know)';
-    case "MEMORY": return "memory_save key=day0 (your first memory — the runtime stamps it UNVERIFIED_WORKING_NOTE)";
-    case "BEAR_PASS": return 'journal_append kind=bear_pass (challenge your own observation)';
+    case "JOURNAL_OBSERVATION": return 'journal_append kind=observation — put your observation in "decision" (what you saw + what you don\'t know)';
+    case "MEMORY": return "memory_save key=day0 — put your memory in \"content\" (the runtime stamps it UNVERIFIED_WORKING_NOTE)";
+    case "BEAR_PASS": return 'journal_append kind=bear_pass — put the bear case in "decision" (challenge your own observation)';
     case "COMPLETE": return '{"say":"day0 complete"}';
     default: return "unknown stage";
   }
@@ -91,13 +91,14 @@ function marketPrice(args, marketFetch) {
 
 const DAY0_TASK =
   "Day 0 protocol is ENFORCED IN CODE — one action per turn, in this exact order:\n" +
-  "(1) journal_append kind=uncertainty_recitation — recite the uncertainty order in your own words.\n" +
+  "(1) journal_append kind=uncertainty_recitation — args {\"kind\":\"uncertainty_recitation\",\"decision\":\"<your recitation, your own words>\"} — the substantive text goes in \"decision\" (required, non-empty).\n" +
   "(2) market_price for one major (btc, eth, or sol) — the only wired read tool.\n" +
-  "(3) journal_append kind=observation — what you saw, and explicitly what you don't know.\n" +
-  "(4) memory_save key=day0 — your first memory (the runtime stamps it UNVERIFIED_WORKING_NOTE).\n" +
-  "(5) journal_append kind=bear_pass — challenge your own observation with the strongest bear point.\n" +
+  "(3) journal_append kind=observation — args {\"kind\":\"observation\",\"decision\":\"<what you saw + what you don't know>\"} — substantive text in \"decision\" (required, non-empty).\n" +
+  "(4) memory_save key=day0 — args {\"key\":\"day0\",\"content\":\"<your first memory>\"} — the text goes in \"content\" (required, non-empty; the runtime stamps it UNVERIFIED_WORKING_NOTE).\n" +
+  "(5) journal_append kind=bear_pass — args {\"kind\":\"bear_pass\",\"decision\":\"<the strongest bear point against your observation>\"} — substantive text in \"decision\" (required, non-empty).\n" +
   '(6) {"say":"day0 complete"} — then STOP at the human authority boundary.\n' +
   "Out-of-order actions are refused by the runtime. " +
+  "Payload contract: journal_append requires a non-empty \"decision\"; memory_save requires a non-empty \"content\"; a \"text\" field is not read and is refused fail-closed. " +
   'Respond ONLY with JSON: {"tool":"<name>","args":{...}} or {"say":"..."}';
 
 function buildSystemPrompt(repoRoot, verifiedDocs) {
@@ -127,6 +128,7 @@ function buildSystemPrompt(repoRoot, verifiedDocs) {
     "You are in Stage 0 — Eyes. Your only writes are to your OWN journal and memory. " +
     "Every action must be exactly one JSON object: a tool call or a say. " +
     "The Day 0 order is enforced in code — out-of-order actions are refused. " +
+    "Payload contract: journal_append requires a non-empty \"decision\"; memory_save requires a non-empty \"content\"; a \"text\" field is not read and is refused fail-closed. " +
     "Finish the bear pass, say day0 complete, then STOP at the human authority boundary."
   );
 }
@@ -166,12 +168,21 @@ export async function runDay0({
       if (!["uncertainty_recitation", "observation", "bear_pass"].includes(kind)) {
         return { refused: true, reason: `kind "${kind}" is not part of the Day 0 protocol` };
       }
+      const decision = args?.decision;
+      if (typeof decision !== "string" || decision.trim() === "") {
+        return {
+          refused: true,
+          reason:
+            'journal_append requires a non-empty "decision" string (the substantive text)' +
+            (args?.text !== undefined ? ' — a "text" field is not in the payload contract; put the content in "decision"' : ""),
+        };
+      }
       const entry = {
         ts: now(),
         type: "entry",
         kind,
         symbol: args?.symbol ?? null,
-        decision: String(args?.decision ?? ""),
+        decision,
         outcome: args?.outcome ?? null,
       };
       jline(entry);
@@ -186,9 +197,18 @@ export async function runDay0({
           reason: "provenance is structural — Agent1 writes are UNVERIFIED_WORKING_NOTE; only an authenticated principal path may create PRINCIPAL_DECLARED",
         };
       }
+      const content = args?.content;
+      if (typeof content !== "string" || content.trim() === "") {
+        return {
+          refused: true,
+          reason:
+            'memory_save requires a non-empty "content" string (the substantive text)' +
+            (args?.text !== undefined ? ' — a "text" field is not in the payload contract; put the content in "content"' : ""),
+        };
+      }
       const mem = JSON.parse(readFileSync(memoryPath, "utf8") || "{}");
       mem[String(args?.key ?? "note")] = {
-        content: String(args?.content ?? ""),
+        content,
         provenance: "UNVERIFIED_WORKING_NOTE",
         ts: now(),
       };
