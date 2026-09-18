@@ -24,6 +24,11 @@
       "path": "docs/agent1-upbringing-recipe.md",
       "kind": "CONTEXT",
       "gitBlobSha1": "900de50c1f5ea59b080e59929f13609084651085"
+    },
+    {
+      "path": "docs/agent1-lessons-learned.md",
+      "kind": "CONTEXT",
+      "gitBlobSha1": "a37c410670aec4dd741f0b63a7dc17efe9e661b3"
     }
   ]
 }
