@@ -1,4 +1,4 @@
-// reconcile-day0.test.mjs v3 — tests for the Day 0 reconciliation final repair (PR #10).
+// reconcile-day0.test.mjs v4 — tests for the Day 0 reconciliation final-final repair (PR #10).
 // Fixtures reproduce the ACTUAL first-birth log shape: "[turn N @ STAGE] {json action}"
 // + "[ok] tool → result" (zero refusals, matching the real birth). Historical stores
 // reproduce the real empty-shell defect shape. Genesis fixtures bind to the CANONICAL
@@ -8,10 +8,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
-import { reconcile, ReconcileRefused } from "../reconciliation/reconcile-day0.mjs";
+import { reconcile, ReconcileRefused, parseCli } from "../reconciliation/reconcile-day0.mjs";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const TOOL = join(HERE, "..", "reconciliation", "reconcile-day0.mjs");
 
 const SOURCE_COMMIT = "7429d2709caa1de839168749e954d4a30662acaf";
 const GENESIS = JSON.stringify({
@@ -43,6 +48,7 @@ const LOG = [
   "[ok] journal_append → recorded",
   '[turn 6 @ COMPLETE] {"say":"day0 complete"}',
 ].join("\n") + "\n";
+const LOG_SHA = createHash("sha256").update(LOG).digest("hex");
 
 function emptyShell(kind) {
   return JSON.stringify({ ts: "2026-09-18T17:21:40.000Z", type: "entry", kind, symbol: "DAY0", decision: "", outcome: "" });
@@ -55,7 +61,7 @@ const EMPTY_JOURNAL = [GENESIS,
 const EMPTY_MEMORY = JSON.stringify({ day0: { content: "", provenance: "UNVERIFIED_WORKING_NOTE", ts: ORIG_MEM_TS } }, null, 2) + "\n";
 
 function rig() {
-  const dir = mkdtempSync(join(tmpdir(), "rec3-"));
+  const dir = mkdtempSync(join(tmpdir(), "rec4-"));
   const stores = join(dir, "stores");
   const repo = join(dir, "repo");
   mkdirSync(join(repo, "agent1", "config"), { recursive: true });
@@ -78,7 +84,6 @@ function rig() {
   return { dir, stores, repo, log };
 }
 const NOW = () => "2026-09-18T23:59:00.000Z";
-const LOG_SHA = createHash("sha256").update(LOG).digest("hex");
 
 test("1. exact live-shape happy path (dry-run then apply)", () => {
   const { dir, stores, repo, log } = rig();
@@ -120,22 +125,46 @@ test("3. exact semantic recovery including MEMORY", () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("4. duplicate/missing required stage refuses", () => {
+test("4. duplicate/missing required stage refuses (parser path, exact reason)", () => {
   const { dir, stores, repo, log } = rig();
   const dup = LOG.replace("Genesis receipt written.\n", "Genesis receipt written.\n" + LOG.split("\n")[2] + "\n");
   const dupLog = join(dir, "dup.log"); writeFileSync(dupLog, dup);
-  assert.throws(() => reconcile({ logPath: dupLog, storesDir: stores, repoRoot: repo, apply: true, expectLogSha256: "x" }), ReconcileRefused);
+  const dupSha = createHash("sha256").update(dup).digest("hex");
+  assert.throws(
+    () => reconcile({ logPath: dupLog, storesDir: stores, repoRoot: repo, apply: true, expectLogSha256: dupSha }),
+    /duplicate stage UNCERTAINTY/,
+  );
   const miss = LOG.replace(/^\[turn 5 @ BEAR_PASS\].*\n(\[ok\].*\n)?/m, "");
   const missLog = join(dir, "miss.log"); writeFileSync(missLog, miss);
-  assert.throws(() => reconcile({ logPath: missLog, storesDir: stores, repoRoot: repo, apply: true, expectLogSha256: "x" }), ReconcileRefused);
+  const missSha = createHash("sha256").update(miss).digest("hex");
+  assert.throws(
+    () => reconcile({ logPath: missLog, storesDir: stores, repoRoot: repo, apply: true, expectLogSha256: missSha }),
+    /missing required stage BEAR_PASS/,
+  );
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("5. malformed JSON action refuses", () => {
+test("5. malformed JSON action refuses (parser path, exact reason)", () => {
   const { dir, stores, repo, log } = rig();
   const bad = LOG.replace('{"tool":"memory_save","args":{"key":"day0","text":"First birth: constitution bound, genesis written, day0 stages walked."}}', "{not json");
   const badLog = join(dir, "bad.log"); writeFileSync(badLog, bad);
-  assert.throws(() => reconcile({ logPath: badLog, storesDir: stores, repoRoot: repo, apply: true, expectLogSha256: "x" }), ReconcileRefused);
+  const badSha = createHash("sha256").update(bad).digest("hex");
+  assert.throws(
+    () => reconcile({ logPath: badLog, storesDir: stores, repoRoot: repo, apply: true, expectLogSha256: badSha }),
+    /payload is not valid JSON action/,
+  );
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("5b. wrong kind refuses explicitly (parser path, exact reason)", () => {
+  const { dir, stores, repo, log } = rig();
+  const wrongKind = LOG.replace('"kind":"uncertainty_recitation"', '"kind":"observation"');
+  const wrongKindLog = join(dir, "wrongkind.log"); writeFileSync(wrongKindLog, wrongKind);
+  const sha = createHash("sha256").update(wrongKind).digest("hex");
+  assert.throws(
+    () => reconcile({ logPath: wrongKindLog, storesDir: stores, repoRoot: repo, apply: true, expectLogSha256: sha }),
+    /expected kind uncertainty_recitation, got observation/,
+  );
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -244,10 +273,132 @@ test("16. genesis binding: wrong sourceCommit / wrong doc sha / missing lock all
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("17. genesis binding: wrong path or kind refuses", () => {
+test("17. genesis binding: wrong path AND wrong kind each refuse", () => {
   const { dir, stores, repo, log } = rig();
-  const swapped = GENESIS.replace("docs/doctrine.md", "docs/wrong-path.md");
-  writeFileSync(join(stores, "journal.jsonl"), [swapped, emptyShell("uncertainty_recitation"), emptyShell("observation"), emptyShell("bear_pass")].join("\n") + "\n");
-  assert.throws(() => reconcile({ logPath: log, storesDir: stores, repoRoot: repo, apply: true, expectLogSha256: LOG_SHA }), ReconcileRefused);
+  // wrong path: the tool iterates LOCK documents, so the mismatch is reported for the
+  // lock's docs/doctrine.md entry (genesis carries docs/wrong-path.md instead).
+  const wrongPath = GENESIS.replace("docs/doctrine.md", "docs/wrong-path.md");
+  writeFileSync(join(stores, "journal.jsonl"), [wrongPath, emptyShell("uncertainty_recitation"), emptyShell("observation"), emptyShell("bear_pass")].join("\n") + "\n");
+  assert.throws(() => reconcile({ logPath: log, storesDir: stores, repoRoot: repo, apply: true, expectLogSha256: LOG_SHA }), /binding mismatch for docs\/doctrine\.md/);
+  // wrong kind on the same doc (path right, kind wrong)
+  const wrongKind = GENESIS.replace('"path":"docs/doctrine.md","kind":"LAW"', '"path":"docs/doctrine.md","kind":"CONTEXT"');
+  writeFileSync(join(stores, "journal.jsonl"), [wrongKind, emptyShell("uncertainty_recitation"), emptyShell("observation"), emptyShell("bear_pass")].join("\n") + "\n");
+  assert.throws(() => reconcile({ logPath: log, storesDir: stores, repoRoot: repo, apply: true, expectLogSha256: LOG_SHA }), /binding mismatch for docs\/doctrine\.md/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// ---------- v4 blockers ----------
+
+test("18. parseCli: dry-run LOG STORES parses; unknown flag refuses; missing sha value refuses; wrong positional count refuses", () => {
+  const ok = parseCli(["log.txt", "stores"]);
+  assert.deepEqual(ok, { apply: false, expectLogSha256: null, logPath: "log.txt", storesDir: "stores" });
+  const applied = parseCli(["log.txt", "stores", "--apply", "--expect-log-sha256", "abc"]);
+  assert.equal(applied.apply, true);
+  assert.equal(applied.expectLogSha256, "abc");
+  assert.throws(() => parseCli(["log.txt", "stores", "--wat"]), /unknown flag/);
+  assert.throws(() => parseCli(["log.txt", "stores", "--apply", "--expect-log-sha256"]), /requires a value/);
+  assert.throws(() => parseCli(["log.txt"]), /usage:/);
+  assert.throws(() => parseCli(["log.txt", "stores", "extra"]), /usage:/);
+});
+
+test("19. CLI integration: dry-run via child_process — exit 0, DRY RUN/APPLY REQUIRED, stores byte-identical", () => {
+  const { dir, stores, repo, log } = rig();
+  const out = execFileSync(process.execPath, [TOOL, log, stores], { cwd: repo, encoding: "utf8" });
+  assert.match(out, /DRY RUN — no stores mutated/);
+  assert.match(out, /APPLY REQUIRED/);
+  assert.match(out, new RegExp(LOG_SHA));
+  assert.equal(readFileSync(join(stores, "journal.jsonl"), "utf8"), EMPTY_JOURNAL);
+  assert.equal(readFileSync(join(stores, "memory.json"), "utf8"), EMPTY_MEMORY);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("20. CLI integration: apply without sha refuses with exit 1", () => {
+  const { dir, stores, repo, log } = rig();
+  assert.throws(() => execFileSync(process.execPath, [TOOL, log, stores, "--apply"], { cwd: repo, encoding: "utf8" }), (e) => e.status === 1 && /REFUSED/.test(e.stderr));
+  assert.equal(readFileSync(join(stores, "journal.jsonl"), "utf8"), EMPTY_JOURNAL);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("21. CLI integration: unknown flag refuses with exit 1", () => {
+  const { dir, stores, repo, log } = rig();
+  assert.throws(() => execFileSync(process.execPath, [TOOL, log, stores, "--wat"], { cwd: repo, encoding: "utf8" }), (e) => e.status === 1 && /unknown flag/.test(e.stderr));
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("22. CLI integration: full apply via child_process mutates exactly once", () => {
+  const { dir, stores, repo, log } = rig();
+  const out = execFileSync(process.execPath, [TOOL, log, stores, "--apply", "--expect-log-sha256", LOG_SHA], { cwd: repo, encoding: "utf8" });
+  assert.match(out, /APPLY COMPLETE/);
+  assert.doesNotMatch(out, /DRY RUN/);
+  const jLines = readFileSync(join(stores, "journal.jsonl"), "utf8").split("\n").filter(l => l.trim());
+  assert.equal(jLines.length, 5);
+  const mem = JSON.parse(readFileSync(join(stores, "memory.json"), "utf8"));
+  assert.equal(mem.day0.content, "First birth: constitution bound, genesis written, day0 stages walked.");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("23. journal post-write CORRUPT bytes => refuse + both stores restored byte-for-byte", () => {
+  const { dir, stores, repo, log } = rig();
+  let first = true;
+  const io = {
+    write: (p, d) => {
+      if (first && p.endsWith("journal.jsonl")) { first = false; writeFileSync(p, d + "GARBAGE\n"); return; } // corrupt the mutation
+      writeFileSync(p, d); // restore writes are clean
+    },
+  };
+  assert.throws(() => reconcile({ logPath: log, storesDir: stores, repoRoot: repo, now: NOW, apply: true, expectLogSha256: LOG_SHA, io }), /journal post-write verification failed — both stores restored \(verified byte-for-byte\)/);
+  assert.equal(readFileSync(join(stores, "journal.jsonl"), "utf8"), EMPTY_JOURNAL);
+  assert.equal(readFileSync(join(stores, "memory.json"), "utf8"), EMPTY_MEMORY);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("24. appended receipt unparsable => refuse + both stores restored byte-for-byte", () => {
+  const { dir, stores, repo, log } = rig();
+  let first = true;
+  const io = {
+    write: (p, d) => {
+      if (first && p.endsWith("journal.jsonl")) {
+        first = false;
+        // corrupt ONLY the appended receipt line (last line), keep prefix intact
+        const s = d.toString();
+        const idx = s.lastIndexOf('{"ts":');
+        writeFileSync(p, s.slice(0, idx) + "{corrupt receipt\n");
+        return;
+      }
+      writeFileSync(p, d);
+    },
+  };
+  assert.throws(() => reconcile({ logPath: log, storesDir: stores, repoRoot: repo, now: NOW, apply: true, expectLogSha256: LOG_SHA, io }), /appended receipt unparsable.*both stores restored \(verified byte-for-byte\)/);
+  assert.equal(readFileSync(join(stores, "journal.jsonl"), "utf8"), EMPTY_JOURNAL);
+  assert.equal(readFileSync(join(stores, "memory.json"), "utf8"), EMPTY_MEMORY);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("25. memory post-write CORRUPT bytes => refuse + both stores restored byte-for-byte", () => {
+  const { dir, stores, repo, log } = rig();
+  let first = true;
+  const io = {
+    write: (p, d) => {
+      if (first && p.endsWith("memory.json")) { first = false; writeFileSync(p, '{"day0":{"content":"WRONG","provenance":"UNVERIFIED_WORKING_NOTE","ts":"x"}}\n'); return; }
+      writeFileSync(p, d);
+    },
+  };
+  assert.throws(() => reconcile({ logPath: log, storesDir: stores, repoRoot: repo, now: NOW, apply: true, expectLogSha256: LOG_SHA, io }), /memory post-write verification failed — both stores restored \(verified byte-for-byte\)/);
+  assert.equal(readFileSync(join(stores, "journal.jsonl"), "utf8"), EMPTY_JOURNAL);
+  assert.equal(readFileSync(join(stores, "memory.json"), "utf8"), EMPTY_MEMORY);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("26. memory post-write unparsable JSON => verified rollback, no raw exception escapes", () => {
+  const { dir, stores, repo, log } = rig();
+  let first = true;
+  const io = {
+    write: (p, d) => {
+      if (first && p.endsWith("memory.json")) { first = false; writeFileSync(p, "{not json"); return; }
+      writeFileSync(p, d);
+    },
+  };
+  assert.throws(() => reconcile({ logPath: log, storesDir: stores, repoRoot: repo, now: NOW, apply: true, expectLogSha256: LOG_SHA, io }), /memory post-write read\/parse failed.*both stores restored \(verified byte-for-byte\)/);
+  assert.equal(readFileSync(join(stores, "memory.json"), "utf8"), EMPTY_MEMORY);
   rmSync(dir, { recursive: true, force: true });
 });

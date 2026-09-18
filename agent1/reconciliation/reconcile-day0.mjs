@@ -1,4 +1,4 @@
-// reconcile-day0.mjs v3 — Day 0 reconciliation recovery (PR #10 final repair)
+// reconcile-day0.mjs v4 — Day 0 reconciliation recovery (PR #10 final-final repair)
 //
 // CORRECTED HISTORY (per principal review):
 //   The first-birth runtime did NOT refuse the substantive writes — journal_append
@@ -6,23 +6,21 @@
 //   args.text while the runtime silently persisted args.decision / args.content,
 //   so the stores hold empty-shell records with valid [ok] receipts.
 //
-// v3 (final review blockers):
-//   - DRY-RUN BY DEFAULT; --apply requires --expect-log-sha256 <sha> so the mutation
-//     is cryptographically bound to the exact log reviewed during dry-run.
-//   - EXACT GENESIS BINDING: loads agent1/config/constitution.lock.json from repoRoot
-//     and requires genesis.sourceCommit === lock.sourceCommit plus exact path+kind+sha
-//     (gitBlobSha1) for ALL five documents. Any mismatch => REFUSE before mutation.
-//   - EXACT PRE-RECONCILIATION JOURNAL SHAPE: genesis + one empty uncertainty_recitation
-//     + one empty observation + one empty bear_pass — NOTHING ELSE. Extra/unknown
-//     records => REFUSE. Append-only; empty shells never rewritten.
-//   - OUTPUT TRUTH: dry-run prints "DRY RUN — no stores mutated" + "APPLY REQUIRED";
-//     apply prints "APPLY COMPLETE" only after post-write verification. Apply output
-//     never contains "DRY RUN".
-//   - ROLLBACK VERIFIED: after any failed write/verify, both stores are restored and
-//     read back byte-for-byte vs captured originals; "restored" is claimed only when
-//     both comparisons pass, otherwise "FATAL: rollback incomplete" names the store.
-//   - Receipt ts = NOW (never backdated); original memory ts preserved as
-//     originalMemoryTs and as restored day0.ts.
+// v4 (final-final blockers):
+//   - CLI parsing rewritten with explicit flag walk (v3 bug: shaIdx===-1 made
+//     shaIdx+1===0, so the positional filter ate argv[0]=LOG). Now: dry-run
+//     `LOG STORES` works; --apply requires --expect-log-sha256 VALUE; missing sha
+//     value refuses; unknown flags refuse; wrong positional count refuses.
+//   - ALL post-write verification is transactional: after the first mutation, every
+//     read/parse/verify exception routes to rollbackOrFail() — verified byte-for-byte
+//     rollback of both stores, or "FATAL: rollback incomplete" naming the store.
+//     No raw readFileSync/JSON.parse exception may escape after mutation.
+//   - Carried from v3: dry-run default; --expect-log-sha256 apply binding; exact
+//     genesis binding to agent1/config/constitution.lock.json (sourceCommit + 5 docs,
+//     exact path/kind/gitBlobSha1); exact pre-reconciliation journal shape (genesis +
+//     3 empty shells, NOTHING else); output truth (APPLY COMPLETE only after
+//     verification, never "DRY RUN" after apply); receipt ts = NOW; originalMemoryTs
+//     preserved.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -79,7 +77,8 @@ export function reconcile({
     }
     const om = line.match(/^\[ok\] (\S+) → (.*)$/);
     if (om && lastTurn) {
-      if (om[1] !== toolNameOf(lastTurn)) {
+      const turnTool = toolNameOf(lastTurn);
+      if (turnTool !== null && om[1] !== turnTool) {
         throw new ReconcileRefused(`[ok] line for ${om[1]} does not match turn tool at stage ${lastTurn.stage}`);
       }
       lastTurn.okResult = om[2];
@@ -246,6 +245,8 @@ export function reconcile({
   }
 
   // ---------- 5. Transactional apply with VERIFIED rollback ----------
+  // After the FIRST mutation, every read/parse/verify exception must route to
+  // rollbackOrFail — no raw exception may escape without verified rollback.
   const restoreBoth = () => {
     const result = { journalRestored: false, memoryRestored: false, errors: [] };
     try { io.write(journalPath, journalRaw); } catch (e) { result.errors.push(`journal restore write failed: ${String(e)}`); }
@@ -270,23 +271,45 @@ export function reconcile({
   } catch (e) {
     rollbackOrFail(`journal write failed: ${String(e)}`);
   }
-  const afterJ = readFileSync(journalPath, "utf8");
-  const afterJLines = afterJ.split("\n").filter(l => l.trim() !== "");
-  if (afterJLines[0] !== genesisLine || !afterJ.startsWith(journalRaw) || afterJLines.length !== jLines.length + 1) {
-    rollbackOrFail("journal post-write verification failed");
+
+  // journal post-write verification — fully transactional
+  let afterJ;
+  try { afterJ = readFileSync(journalPath, "utf8"); } catch (e) {
+    rollbackOrFail(`journal post-write read failed: ${String(e)}`);
   }
-  let recCount = 0;
-  for (const l of afterJLines.slice(1)) { const r = JSON.parse(l); if (r.type === "reconciliation") recCount++; }
-  if (recCount !== 1) rollbackOrFail("expected exactly one reconciliation receipt");
+  try {
+    const afterJLines = afterJ.split("\n").filter(l => l.trim() !== "");
+    if (afterJLines[0] !== genesisLine || !afterJ.startsWith(journalRaw) || afterJLines.length !== jLines.length + 1) {
+      rollbackOrFail("journal post-write verification failed");
+    }
+    let recCount = 0;
+    for (const l of afterJLines.slice(1)) {
+      let r;
+      try { r = JSON.parse(l); } catch (e) { rollbackOrFail(`appended receipt unparsable: ${String(e)}`); }
+      if (r.type === "reconciliation") recCount++;
+    }
+    if (recCount !== 1) rollbackOrFail("expected exactly one reconciliation receipt");
+  } catch (e) {
+    if (e instanceof ReconcileRefused) throw e; // rollbackOrFail already ran + restored
+    rollbackOrFail(`journal post-write verification error: ${String(e)}`);
+  }
 
   try {
     io.write(memoryPath, newMemoryRaw);
   } catch (e) {
     rollbackOrFail(`memory write failed: ${String(e)}`);
   }
-  const afterM = JSON.parse(readFileSync(memoryPath, "utf8"));
-  if (afterM.day0.content !== recovered.MEMORY || afterM.day0.provenance !== "UNVERIFIED_WORKING_NOTE" || afterM.day0.ts !== originalMemoryTs) {
-    rollbackOrFail("memory post-write verification failed");
+
+  // memory post-write verification — fully transactional
+  try {
+    const afterMRaw = readFileSync(memoryPath, "utf8");
+    const afterM = JSON.parse(afterMRaw);
+    if (afterM?.day0?.content !== recovered.MEMORY || afterM?.day0?.provenance !== "UNVERIFIED_WORKING_NOTE" || afterM?.day0?.ts !== originalMemoryTs) {
+      rollbackOrFail("memory post-write verification failed");
+    }
+  } catch (e) {
+    if (e instanceof ReconcileRefused) throw e;
+    rollbackOrFail(`memory post-write read/parse failed: ${String(e)}`);
   }
 
   const output = [
@@ -302,17 +325,37 @@ function toolNameOf(turn) {
   try { return JSON.parse(turn.payload)?.tool ?? null; } catch { return null; }
 }
 
-// CLI: node reconcile-day0.mjs LOG STORES [--apply --expect-log-sha256 <sha>]
-// Dry-run is the default and mutates nothing. repoRoot defaults to cwd (run from repo root).
+// Explicit CLI parsing (v3 bug fixed: no index arithmetic on -1).
+// Usage: node reconcile-day0.mjs LOG STORES [--apply --expect-log-sha256 <sha>]
+export function parseCli(argv) {
+  const flags = { apply: false, expectLogSha256: null };
+  const positional = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--apply") {
+      flags.apply = true;
+    } else if (a === "--expect-log-sha256") {
+      if (i + 1 >= argv.length || argv[i + 1].startsWith("--")) {
+        throw new ReconcileRefused("--expect-log-sha256 requires a value");
+      }
+      flags.expectLogSha256 = argv[++i];
+    } else if (a.startsWith("--")) {
+      throw new ReconcileRefused(`unknown flag ${a} — supported: --apply, --expect-log-sha256 <sha>`);
+    } else {
+      positional.push(a);
+    }
+  }
+  if (positional.length !== 2) {
+    throw new ReconcileRefused("usage: node reconcile-day0.mjs LOG STORES [--apply --expect-log-sha256 <sha>]");
+  }
+  return { apply: flags.apply, expectLogSha256: flags.expectLogSha256, logPath: positional[0], storesDir: positional[1] };
+}
+
+// CLI entry. Dry-run is the default and mutates nothing. repoRoot = cwd (run from repo root).
 if (process.argv[1] && process.argv[1].endsWith("reconcile-day0.mjs")) {
-  const argv = process.argv.slice(2);
-  const apply = argv.includes("--apply");
-  const shaIdx = argv.indexOf("--expect-log-sha256");
-  const expectLogSha256 = shaIdx !== -1 ? argv[shaIdx + 1] : null;
-  const positional = argv.filter((a, i) => a !== "--apply" && a !== "--expect-log-sha256" && i !== shaIdx + 1);
-  const [logPath, storesDir] = positional;
   try {
-    const r = reconcile({ logPath, storesDir, repoRoot: process.cwd(), apply, expectLogSha256 });
+    const cli = parseCli(process.argv.slice(2));
+    const r = reconcile({ logPath: cli.logPath, storesDir: cli.storesDir, repoRoot: process.cwd(), apply: cli.apply, expectLogSha256: cli.expectLogSha256 });
     for (const line of r.output) console.log(line);
   } catch (e) {
     console.error("REFUSED: " + (e instanceof ReconcileRefused ? e.message : String(e)));

@@ -1,4 +1,4 @@
-# Day 0 Reconciliation — v3 (PR #10 final repair, per principal reviews of 04abbbd5 / 199ef736)
+# Day 0 Reconciliation — v4 (PR #10 final-final repair, per principal reviews of 04abbbd5 / 199ef736 / f57ae2f6)
 
 ## Corrected history
 The first-birth runtime did **NOT** refuse the substantive Day 0 writes —
@@ -9,11 +9,16 @@ valid `[ok]` receipts**. The defect was repaired in PR #9. The immutable
 first-birth log (`~/agent1-firstboot-20260918T172117Z.log`, principal machine)
 still holds the full transcript with the exact semantic payloads.
 
-## What v3 does
+## What v4 does
 - **DRY-RUN BY DEFAULT.** `node agent1/reconciliation/reconcile-day0.mjs LOG STORES`
   mutates nothing: prints log SHA256, recovered stage inventory, historical-store
   precondition result, planned journal receipt, planned memory restoration, and
   `APPLY REQUIRED`.
+- **Explicit CLI parsing (v3 bug fixed).** v3's index arithmetic (`shaIdx+1===0`
+  when the flag was absent) ate the LOG positional. v4 walks flags explicitly:
+  dry-run `LOG STORES` works; `--apply` requires `--expect-log-sha256 VALUE`;
+  missing sha value refuses; unknown flags refuse; wrong positional count refuses.
+  Covered by unit tests AND child_process CLI integration tests.
 - **Cryptographic apply binding.** Mutation requires explicit principal action with
   the exact reviewed log: `--apply --expect-log-sha256 <sha256-from-dry-run>`.
   A missing or mismatching sha refuses — the input log cannot change between
@@ -31,11 +36,17 @@ still holds the full transcript with the exact semantic payloads.
   `journal_append args.text`; MEMORY = `memory_save args.text`; OBSERVE is
   preserved as tool evidence (`market_price` action + tool result), never mistaken
   for prose. Exactly one matching payload per required stage — missing / duplicate /
-  malformed / wrong-tool / wrong-kind ⇒ REFUSE. Words are never reconstructed from
-  memory.
+  malformed / wrong-tool / wrong-kind ⇒ REFUSE (each with its specific reason;
+  malformed JSON is never masked by the `[ok]` tool cross-check). Words are never
+  reconstructed from memory.
 - **Output truth.** Dry-run prints `DRY RUN — no stores mutated` + `APPLY REQUIRED`.
   Apply prints `APPLY COMPLETE` only after post-write verification; apply output
   never contains "DRY RUN" (regression-tested).
+- **Fully transactional post-write verification.** After the first mutation, EVERY
+  read/parse/verify exception routes to verified rollback — journal post-write
+  corruption, unparsable appended receipt, memory post-write corruption or
+  unparsable JSON all refuse with both stores restored byte-for-byte. No raw
+  `readFileSync`/`JSON.parse` exception may escape after mutation.
 - **Verified rollback.** Exact pre-mutation bytes of BOTH stores are captured. After
   any failed write/verify, both stores are restored and read back byte-for-byte;
   "both stores restored" is claimed only when both comparisons pass — otherwise
@@ -49,14 +60,15 @@ still holds the full transcript with the exact semantic payloads.
 
 ## Fail-closed guarantees
 1. Dry-run default — no mutation without `--apply --expect-log-sha256`.
-2. Genesis bound to the canonical lock (sourceCommit + 5 docs, exact path/kind/sha).
-3. Exact journal shape (genesis + 3 empty shells, nothing else) — unexpected state ⇒
+2. Strict CLI: unknown flags / missing sha value / wrong positional count refuse.
+3. Genesis bound to the canonical lock (sourceCommit + 5 docs, exact path/kind/sha).
+4. Exact journal shape (genesis + 3 empty shells, nothing else) — unexpected state ⇒
    write nothing.
-4. Transactional apply with byte-verified rollback of BOTH stores; FATAL names the
-   store when restoration cannot be proven.
-5. Genesis byte-identical; original journal bytes preserved as exact prefix.
-6. Idempotent: a second reconciliation on the same stores is refused.
-7. Never overwrites real memory content; never fabricates or reconstructs text.
+5. Transactional apply: every post-write read/parse/verify failure ⇒ byte-verified
+   rollback of BOTH stores; FATAL names the store when restoration cannot be proven.
+6. Genesis byte-identical; original journal bytes preserved as exact prefix.
+7. Idempotent: a second reconciliation on the same stores is refused.
+8. Never overwrites real memory content; never fabricates or reconstructs text.
 
 ## Recovery scope (honest limits)
 Recovered content = the exact `args.text` payloads from the log's JSON actions +
@@ -64,16 +76,20 @@ the OBSERVE tool evidence. Nothing else is inferred; absence ⇒ refusal, never
 fabrication.
 
 ## Test
-`agent1/test/reconcile-day0.test.mjs` — **17/17 pass** (synthetic fixtures in the
+`agent1/test/reconcile-day0.test.mjs` — **27/27 pass** (synthetic fixtures in the
 actual first-birth structural shape, zero refusals, genesis bound to the canonical
 lock): live-shape happy path, dry-run non-mutation, exact semantic recovery
-including MEMORY, duplicate/missing stage, malformed JSON, wrong empty-shell store
-(incl. extra-record refusal), non-empty memory, duplicate reconciliation,
-journal-write-failure verified rollback, memory-write-failure verified rollback,
-exact-prefix preservation, apply-output truth (no "DRY RUN" after apply), failed
-rollback ⇒ FATAL (no false restored claim), apply without/wrong
+including MEMORY, duplicate/missing stage + malformed JSON + wrong kind (each with
+exact refusal reason, exact-SHA-bound), wrong empty-shell store (incl. extra-record
+refusal), non-empty memory, duplicate reconciliation, journal-write-failure verified
+rollback, memory-write-failure verified rollback, exact-prefix preservation,
+apply-output truth, failed rollback ⇒ FATAL, apply without/wrong
 `--expect-log-sha256` refuses, genesis binding (wrong sourceCommit / wrong doc sha /
-missing lock / wrong path or kind all refuse).
+missing lock / wrong path / wrong kind all refuse), parseCli unit tests, four
+child_process CLI integration tests (dry-run exit 0 + byte-identical stores; apply
+without sha exit 1; unknown flag exit 1; full apply mutates exactly once), and
+post-write corruption regressions (journal corrupt bytes, unparsable receipt,
+memory corrupt bytes, memory unparsable JSON — all refuse with verified rollback).
 
 ## Run (principal steps, after merge)
 ```
