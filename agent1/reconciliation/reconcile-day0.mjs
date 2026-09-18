@@ -1,24 +1,28 @@
-// reconcile-day0.mjs v2 — Day 0 reconciliation recovery (PR #10 repair)
+// reconcile-day0.mjs v3 — Day 0 reconciliation recovery (PR #10 final repair)
 //
-// CORRECTED HISTORY (per principal review of head 04abbbd5):
+// CORRECTED HISTORY (per principal review):
 //   The first-birth runtime did NOT refuse the substantive writes — journal_append
 //   and memory_save both returned [ok]. The pre-PR#9 defect: the live model emitted
 //   args.text while the runtime silently persisted args.decision / args.content,
 //   so the stores hold empty-shell records with valid [ok] receipts.
 //
-// v2 behavior:
-//   - DRY-RUN BY DEFAULT: prints evidence + plan, mutates nothing. --apply required.
-//   - Parses the ACTUAL live-shape log: "[turn N @ STAGE] {json action}" + "[ok] tool → result".
-//   - Recovers EXACT semantic payloads: journal_append args.text per stage,
-//     memory_save args.text for MEMORY; OBSERVE preserved as tool evidence, not prose.
-//   - Exactly one matching payload per required stage; missing/duplicate/malformed/
-//     wrong-tool/wrong-kind => REFUSE. Never reconstructs words from memory.
-//   - Verifies the exact historical store shape BEFORE mutation (genesis binding,
-//     three empty-shell records exactly once, no prior reconciliation, empty day0 memory).
-//   - Transactional apply: any write/verify failure restores BOTH stores to exact
-//     pre-mutation bytes, then refuses. Genesis line byte-identical; original journal
-//     bytes preserved as exact prefix; exactly one receipt appended.
-//   - Receipt ts = NOW (never backdated); original memory ts preserved as originalMemoryTs.
+// v3 (final review blockers):
+//   - DRY-RUN BY DEFAULT; --apply requires --expect-log-sha256 <sha> so the mutation
+//     is cryptographically bound to the exact log reviewed during dry-run.
+//   - EXACT GENESIS BINDING: loads agent1/config/constitution.lock.json from repoRoot
+//     and requires genesis.sourceCommit === lock.sourceCommit plus exact path+kind+sha
+//     (gitBlobSha1) for ALL five documents. Any mismatch => REFUSE before mutation.
+//   - EXACT PRE-RECONCILIATION JOURNAL SHAPE: genesis + one empty uncertainty_recitation
+//     + one empty observation + one empty bear_pass — NOTHING ELSE. Extra/unknown
+//     records => REFUSE. Append-only; empty shells never rewritten.
+//   - OUTPUT TRUTH: dry-run prints "DRY RUN — no stores mutated" + "APPLY REQUIRED";
+//     apply prints "APPLY COMPLETE" only after post-write verification. Apply output
+//     never contains "DRY RUN".
+//   - ROLLBACK VERIFIED: after any failed write/verify, both stores are restored and
+//     read back byte-for-byte vs captured originals; "restored" is claimed only when
+//     both comparisons pass, otherwise "FATAL: rollback incomplete" names the store.
+//   - Receipt ts = NOW (never backdated); original memory ts preserved as
+//     originalMemoryTs and as restored day0.ts.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -33,18 +37,20 @@ const STAGE_CONTRACT = {
   MEMORY: { tool: "memory_save", key: "day0" },
   BEAR_PASS: { tool: "journal_append", kind: "bear_pass" },
 };
+const EMPTY_SHELL_KINDS = ["uncertainty_recitation", "observation", "bear_pass"];
 
 const defaultIo = { write: (path, data) => writeFileSync(path, data) };
 
 export function reconcile({
   logPath,
   storesDir,
+  repoRoot,
   now = () => new Date().toISOString(),
   apply = false,
-  expectSourceCommit = null,
+  expectLogSha256 = null,
   io = defaultIo,
 }) {
-  if (!logPath || !storesDir) throw new ReconcileRefused("usage: reconcile({logPath, storesDir, apply?})");
+  if (!logPath || !storesDir || !repoRoot) throw new ReconcileRefused("usage: reconcile({logPath, storesDir, repoRoot, apply?, expectLogSha256?})");
   if (!existsSync(logPath)) throw new ReconcileRefused("first-birth log not found — nothing recovered, nothing written");
   const journalPath = join(storesDir, "journal.jsonl");
   const memoryPath = join(storesDir, "memory.json");
@@ -55,10 +61,16 @@ export function reconcile({
   const logRaw = readFileSync(logPath, "utf8");
   const logSha256 = createHash("sha256").update(logRaw).digest("hex");
 
-  const turns = []; // {n, stage, payload, okResult|null}
-  const lines = logRaw.split("\n");
+  if (apply) {
+    if (!expectLogSha256) throw new ReconcileRefused("apply requires --expect-log-sha256 <sha256> — cryptographically bind the mutation to the exact log reviewed during dry-run");
+    if (String(expectLogSha256).toLowerCase() !== logSha256) {
+      throw new ReconcileRefused(`--expect-log-sha256 ${expectLogSha256} does not match actual log sha256 ${logSha256} — log changed since review? refusing`);
+    }
+  }
+
+  const turns = [];
   let lastTurn = null;
-  for (const line of lines) {
+  for (const line of logRaw.split("\n")) {
     const tm = line.match(/^\[turn (\d+) @ ([A-Z_]+)\] (.*)$/);
     if (tm) {
       lastTurn = { n: Number(tm[1]), stage: tm[2], payload: tm[3], okResult: null };
@@ -75,7 +87,6 @@ export function reconcile({
   }
   if (turns.length === 0) throw new ReconcileRefused("no [turn …] records found — not a first-birth log?");
 
-  // Canonical order, exactly once each, strictly increasing turn numbers
   const seen = [];
   let prevN = 0;
   for (const t of turns) {
@@ -92,7 +103,7 @@ export function reconcile({
   if (orderErr !== -1) throw new ReconcileRefused(`stages out of canonical order at ${seen[orderErr]}`);
 
   // ---------- 2. Semantic payload extraction (exact, per stage) ----------
-  const recovered = {}; // prose payloads
+  const recovered = {};
   let observeEvidence = null;
   for (const t of turns) {
     let action;
@@ -109,7 +120,6 @@ export function reconcile({
     }
     if (t.okResult === null) throw new ReconcileRefused(`stage ${t.stage}: missing [ok] tool-result line`);
     if (t.stage === "OBSERVE") {
-      // Evidence, NOT prose: preserve action + tool result separately.
       observeEvidence = { action: action.args ?? null, toolResult: t.okResult };
       continue;
     }
@@ -138,27 +148,40 @@ export function reconcile({
   if (typeof genesis.sourceCommit !== "string" || !/^[0-9a-f]{40}$/.test(genesis.sourceCommit)) {
     throw new ReconcileRefused("genesis sourceCommit missing/not full 40-hex sha");
   }
-  if (!Array.isArray(genesis.constitution) || genesis.constitution.length === 0) {
-    throw new ReconcileRefused("genesis constitution binding missing");
-  }
-  if (expectSourceCommit && genesis.sourceCommit !== expectSourceCommit) {
-    throw new ReconcileRefused(`genesis sourceCommit ${genesis.sourceCommit} != expected ${expectSourceCommit}`);
-  }
   const genesisLine = jLines[0];
 
-  const emptyShellKinds = ["uncertainty_recitation", "observation", "bear_pass"];
-  const kindCounts = {};
-  for (const l of jLines.slice(1)) {
-    let rec;
-    try { rec = JSON.parse(l); } catch { throw new ReconcileRefused("journal contains unparsable record — unexpected store shape"); }
-    if (rec?.type === "reconciliation") throw new ReconcileRefused("previous reconciliation record present — refusing duplicate");
-    if (rec?.type === "entry" && emptyShellKinds.includes(rec.kind)) {
-      kindCounts[rec.kind] = (kindCounts[rec.kind] ?? 0) + 1;
-      if (rec.decision !== "") throw new ReconcileRefused(`journal ${rec.kind} record is not an empty shell (decision=${JSON.stringify(rec.decision)}) — unexpected store shape`);
+  // EXACT GENESIS BINDING to the canonical lock (no optional weakening)
+  const lockPath = join(repoRoot, "agent1", "config", "constitution.lock.json");
+  if (!existsSync(lockPath)) throw new ReconcileRefused("agent1/config/constitution.lock.json not found under repoRoot — cannot bind genesis, refusing");
+  let lock;
+  try { lock = JSON.parse(readFileSync(lockPath, "utf8")); } catch { throw new ReconcileRefused("constitution.lock.json unparsable — refusing"); }
+  if (lock?.sourceCommit !== genesis.sourceCommit) {
+    throw new ReconcileRefused(`genesis sourceCommit ${genesis.sourceCommit} != lock sourceCommit ${lock?.sourceCommit} — refusing`);
+  }
+  if (!Array.isArray(lock.documents) || lock.documents.length === 0) throw new ReconcileRefused("lock documents missing — refusing");
+  if (!Array.isArray(genesis.constitution) || genesis.constitution.length !== lock.documents.length) {
+    throw new ReconcileRefused(`genesis constitution has ${genesis.constitution?.length ?? 0} docs, lock has ${lock.documents.length} — refusing`);
+  }
+  for (const doc of lock.documents) {
+    const matches = genesis.constitution.filter(c => c?.path === doc.path && c?.kind === doc.kind && c?.sha === doc.gitBlobSha1);
+    if (matches.length !== 1) {
+      throw new ReconcileRefused(`genesis constitution binding mismatch for ${doc.path} — expected exactly one entry with path+kind+sha equal to lock gitBlobSha1 — refusing`);
     }
   }
-  for (const k of emptyShellKinds) {
-    if (kindCounts[k] !== 1) throw new ReconcileRefused(`expected exactly one empty-shell ${k} record, found ${kindCounts[k] ?? 0}`);
+
+  // EXACT pre-reconciliation journal shape: genesis + 3 empty shells, NOTHING ELSE
+  if (jLines.length !== 1 + EMPTY_SHELL_KINDS.length) {
+    throw new ReconcileRefused(`unexpected journal history: expected exactly genesis + ${EMPTY_SHELL_KINDS.length} empty-shell records, found ${jLines.length} records — refusing`);
+  }
+  for (let i = 0; i < EMPTY_SHELL_KINDS.length; i++) {
+    let rec;
+    try { rec = JSON.parse(jLines[i + 1]); } catch { throw new ReconcileRefused(`journal record ${i + 2} unparsable — refusing`); }
+    if (rec?.type !== "entry" || rec?.kind !== EMPTY_SHELL_KINDS[i]) {
+      throw new ReconcileRefused(`journal record ${i + 2} is ${rec?.type}/${rec?.kind ?? "?"}, expected entry/${EMPTY_SHELL_KINDS[i]} — unexpected journal history, refusing`);
+    }
+    if (rec.decision !== "") {
+      throw new ReconcileRefused(`journal ${EMPTY_SHELL_KINDS[i]} record is not an empty shell (decision=${JSON.stringify(rec.decision)}) — unexpected store shape, refusing`);
+    }
   }
 
   const memRaw = readFileSync(memoryPath, "utf8");
@@ -184,6 +207,7 @@ export function reconcile({
       "Substantive Day 0 content recovered verbatim from the immutable first-birth log. The first-birth runtime " +
       "ACCEPTED the Day 0 writes ([ok]); the pre-PR#9 runtime silently persisted empty payloads because the live " +
       "model emitted args.text while the runtime read args.decision/args.content (defect repaired in PR #9). " +
+      "Genesis bound to canonical agent1/config/constitution.lock.json (sourceCommit + 5 docs, exact path/kind/sha). " +
       "Genesis record untouched; no second boot; no backdating — this receipt is written at reconciliation time; " +
       "the original memory write timestamp is preserved in originalMemoryTs.",
   };
@@ -197,8 +221,9 @@ export function reconcile({
     observeEvidence,
     preconditions: {
       genesisSourceCommit: genesis.sourceCommit,
-      constitutionDocs: genesis.constitution.length,
-      emptyShells: kindCounts,
+      lockBound: true,
+      lockDocuments: lock.documents.length,
+      emptyShells: EMPTY_SHELL_KINDS,
       originalMemoryTs,
     },
     plannedReceipt: receipt,
@@ -206,74 +231,89 @@ export function reconcile({
   };
 
   if (!apply) {
-    return { ok: true, dryRun: true, report, print: () => printReport(report) };
+    const output = [
+      "DRY RUN — no stores mutated",
+      `logSha256: ${logSha256}`,
+      `recovered stages: ${report.recoveredStages.join(", ")}`,
+      ...Object.entries(recovered).map(([k, v]) => `  ${k}: "${v}"`),
+      `  OBSERVE evidence: ${JSON.stringify(observeEvidence)}`,
+      `preconditions: ${JSON.stringify(report.preconditions)}`,
+      `planned journal receipt: ${JSON.stringify(receipt)}`,
+      `planned memory restoration: ${JSON.stringify(report.plannedMemory)}`,
+      "APPLY REQUIRED",
+    ];
+    return { ok: true, dryRun: true, report, output };
   }
 
-  // ---------- 5. Transactional apply ----------
+  // ---------- 5. Transactional apply with VERIFIED rollback ----------
   const restoreBoth = () => {
-    try { io.write(journalPath, journalRaw); } catch { /* best-effort restore */ }
-    try { io.write(memoryPath, memRaw); } catch { /* best-effort restore */ }
+    const result = { journalRestored: false, memoryRestored: false, errors: [] };
+    try { io.write(journalPath, journalRaw); } catch (e) { result.errors.push(`journal restore write failed: ${String(e)}`); }
+    try { io.write(memoryPath, memRaw); } catch (e) { result.errors.push(`memory restore write failed: ${String(e)}`); }
+    try { result.journalRestored = readFileSync(journalPath, "utf8") === journalRaw; } catch (e) { result.errors.push(`journal restore read failed: ${String(e)}`); }
+    try { result.memoryRestored = readFileSync(memoryPath, "utf8") === memRaw; } catch (e) { result.errors.push(`memory restore read failed: ${String(e)}`); }
+    return result;
+  };
+  const rollbackOrFail = (why) => {
+    const rb = restoreBoth();
+    if (rb.journalRestored && rb.memoryRestored) {
+      throw new ReconcileRefused(`${why} — both stores restored (verified byte-for-byte)`);
+    }
+    const diff = [];
+    if (!rb.journalRestored) diff.push("journal");
+    if (!rb.memoryRestored) diff.push("memory");
+    throw new ReconcileRefused(`FATAL: rollback incomplete — ${diff.join(" and ")} differs from pre-mutation bytes${rb.errors.length ? ` (${rb.errors.join("; ")})` : ""}`);
   };
 
   try {
     io.write(journalPath, newJournalRaw);
   } catch (e) {
-    restoreBoth();
-    throw new ReconcileRefused(`journal write failed — both stores restored: ${String(e)}`);
+    rollbackOrFail(`journal write failed: ${String(e)}`);
   }
-  // verify journal: genesis byte-identical, exact prefix, exactly one receipt
   const afterJ = readFileSync(journalPath, "utf8");
   const afterJLines = afterJ.split("\n").filter(l => l.trim() !== "");
   if (afterJLines[0] !== genesisLine || !afterJ.startsWith(journalRaw) || afterJLines.length !== jLines.length + 1) {
-    restoreBoth();
-    throw new ReconcileRefused("journal post-write verification failed — both stores restored");
+    rollbackOrFail("journal post-write verification failed");
   }
   let recCount = 0;
   for (const l of afterJLines.slice(1)) { const r = JSON.parse(l); if (r.type === "reconciliation") recCount++; }
-  if (recCount !== 1) { restoreBoth(); throw new ReconcileRefused("expected exactly one reconciliation receipt — both stores restored"); }
+  if (recCount !== 1) rollbackOrFail("expected exactly one reconciliation receipt");
 
   try {
     io.write(memoryPath, newMemoryRaw);
   } catch (e) {
-    restoreBoth();
-    throw new ReconcileRefused(`memory write failed — both stores restored: ${String(e)}`);
+    rollbackOrFail(`memory write failed: ${String(e)}`);
   }
   const afterM = JSON.parse(readFileSync(memoryPath, "utf8"));
-  if (afterM.day0.content !== recovered.MEMORY || afterM.day0.provenance !== "UNVERIFIED_WORKING_NOTE") {
-    restoreBoth();
-    throw new ReconcileRefused("memory post-write verification failed — both stores restored");
+  if (afterM.day0.content !== recovered.MEMORY || afterM.day0.provenance !== "UNVERIFIED_WORKING_NOTE" || afterM.day0.ts !== originalMemoryTs) {
+    rollbackOrFail("memory post-write verification failed");
   }
 
-  return { ok: true, dryRun: false, receipt, print: () => printReport(report) };
+  const output = [
+    "APPLY COMPLETE",
+    `logSha256: ${logSha256}`,
+    `receipt appended after ${jLines.length} existing records (genesis byte-identical, original bytes preserved as exact prefix)`,
+    `memory restored (originalMemoryTs ${originalMemoryTs} preserved)`,
+  ];
+  return { ok: true, dryRun: false, receipt, output };
 }
 
 function toolNameOf(turn) {
   try { return JSON.parse(turn.payload)?.tool ?? null; } catch { return null; }
 }
 
-function printReport(r) {
-  console.log("DRY RUN — no stores mutated");
-  console.log("logSha256:", r.logSha256);
-  console.log("recovered stages:", r.recoveredStages.join(", "));
-  for (const [k, v] of Object.entries(r.plannedReceipt.recovered)) console.log(`  ${k}: "${v}"`);
-  console.log("  OBSERVE evidence:", JSON.stringify(r.observeEvidence));
-  console.log("preconditions:", JSON.stringify(r.preconditions));
-  console.log("planned journal receipt:", JSON.stringify(r.plannedReceipt));
-  console.log("planned memory restoration:", JSON.stringify(r.plannedMemory));
-  console.log("APPLY REQUIRED");
-}
-
-// CLI: node reconcile-day0.mjs LOG STORES [--apply] [--expect-source-commit <sha>]
+// CLI: node reconcile-day0.mjs LOG STORES [--apply --expect-log-sha256 <sha>]
+// Dry-run is the default and mutates nothing. repoRoot defaults to cwd (run from repo root).
 if (process.argv[1] && process.argv[1].endsWith("reconcile-day0.mjs")) {
   const argv = process.argv.slice(2);
   const apply = argv.includes("--apply");
-  const expectIdx = argv.indexOf("--expect-source-commit");
-  const expectSourceCommit = expectIdx !== -1 ? argv[expectIdx + 1] : null;
-  const [logPath, storesDir] = argv.filter(a => a !== "--apply" && a !== "--expect-source-commit" && a !== expectSourceCommit);
+  const shaIdx = argv.indexOf("--expect-log-sha256");
+  const expectLogSha256 = shaIdx !== -1 ? argv[shaIdx + 1] : null;
+  const positional = argv.filter((a, i) => a !== "--apply" && a !== "--expect-log-sha256" && i !== shaIdx + 1);
+  const [logPath, storesDir] = positional;
   try {
-    const r = reconcile({ logPath, storesDir, apply, expectSourceCommit });
-    r.print();
-    if (!r.dryRun) console.log("APPLIED: receipt appended, genesis intact, memory restored");
+    const r = reconcile({ logPath, storesDir, repoRoot: process.cwd(), apply, expectLogSha256 });
+    for (const line of r.output) console.log(line);
   } catch (e) {
     console.error("REFUSED: " + (e instanceof ReconcileRefused ? e.message : String(e)));
     process.exit(1);
